@@ -10,6 +10,10 @@ Customers open this setup, approve the Windows administrator prompt, then share 
 
 [Release notes, technician guide, checksums and source](https://github.com/mohammedbathia/touch365-update-builder/releases/tag/remote-support-v1.0.1).
 
+The [Remote Support source](customer-setup/README.md) now includes the 1.0.2
+candidate's bounded certificate-chain retry and recovery instructions. This is
+a source update; the published 1.0.1 installer has not been replaced.
+
 ## Update Builder
 
 Download the installer from the [latest release](https://github.com/mohammedbathia/touch365-update-builder/releases/latest). Install it once on each team PC. The builder checks for newer releases automatically when it opens; the header also includes **Check for updates**. When a newer version appears, choose **Install** to download and verify its installer. The builder saves your draft and closes before setup replaces its files.

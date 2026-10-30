@@ -316,6 +316,14 @@ namespace Touch365Support
         {
             SafeFiles.NoReparse(path);
             int status = verify(path, VerificationFlags);
+            if (unchecked((uint)status) == 0x800B010AU)
+            {
+                // Give a transient certificate-retrieval failure one more attempt.
+                // The file must still pass the same Windows Authenticode policy.
+                Thread.Sleep(1000);
+                SafeFiles.NoReparse(path);
+                status = verify(path, VerificationFlags);
+            }
             if (status != 0) throw new InvalidDataException(TrustFailure(path, stage, status));
             if (publisher(path) != "PURSLANE")
                 throw new InvalidDataException("RustDesk has an unexpected publisher (" + stage + ", " + Path.GetFileName(path) + "). Contact Touch365.");
@@ -344,7 +352,7 @@ namespace Touch365Support
                 case 0x800B0100: detail = "Windows could not find a valid signature."; break;
                 case 0x800B0101: detail = "A certificate is outside its valid dates. Check this PC's date and time."; break;
                 case 0x800B0109: detail = "Windows does not trust the certificate's root."; break;
-                case 0x800B010A: detail = "Windows could not build the certificate chain."; break;
+                case 0x800B010A: detail = "Windows could not build the certificate chain. Connect this PC to the internet, check its date and time, then choose Retry setup. If it still fails, Touch365 needs to check this PC's certificate retrieval and Windows trust."; break;
                 case 0x80092013: detail = "Windows could not reach the certificate revocation service. Check the internet connection."; break;
                 case 0x80096005: detail = "Windows could not verify the signature timestamp."; break;
                 default: detail = "Windows did not approve the publisher signature."; break;

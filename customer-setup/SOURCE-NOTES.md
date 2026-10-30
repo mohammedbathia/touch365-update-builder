@@ -4,6 +4,27 @@ Checked 2026-10-28 against official RustDesk tags 1.5.0 and 1.4.3. Research copi
 
 ## Windows signature verification follow-up
 
+The October 29 screenshot is a later 1.0.1 failure with `CERT_E_CHAINING`
+(`0x800B010A`), not proof that the earlier cache-only flag is still set. In a
+read-only local reproduction, both this verifier and Windows PowerShell's
+`Get-AuthenticodeSignature` reject the pinned payload while network retrieval
+is blocked. With network access, the identical SHA-256 verifies as Valid and
+its publisher chain builds successfully. That establishes a local retrieval/
+trust-context dependency; it does not establish the affected customer's cause,
+or prove that the official executable omits intermediate certificates.
+
+Version 1.0.2 retries only `CERT_E_CHAINING` once after one second, keeping the
+same flags, file subject and expected publisher. The final native result must
+be zero. Persistent chain failures, other trust failures and unexpected
+publishers remain rejected. No certificate is imported and no alternative
+trust store, hash-only acceptance or certificate-only fallback is used.
+
+Technician follow-up for a persistent error: record the exact stage/code,
+check connectivity and date/time on the affected PC, then investigate Windows
+certificate retrieval/proxy/trust in the account that runs setup. Any changes
+to machine trust or policy require separate authorization. Customer-PC
+acceptance remains pending; the source change is not a released installer.
+
 Setup 1.0.0 passed `WTD_CACHE_ONLY_URL_RETRIEVAL` (0x1000). Microsoft documents
 that this prevents network retrieval during verification. A new customer PC
 can therefore lack information that the build PC already cached. The reported

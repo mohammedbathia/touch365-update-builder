@@ -1,18 +1,36 @@
-# Verification status — 28 October 2026
+# Verification status - 30 October 2026
 
-Current candidate: Touch365 Remote Support Setup 1.0.1.
+Current source candidate: Touch365 Remote Support Setup 1.0.2.
+Source update only: no release publication, deployment or installation performed.
 
-## Completed
+## Candidate results
 
-- Source review against official RustDesk 1.4.3 and 1.5.0 settings/installer code.
-- Bundled 1.5.0 SHA-256 and actual publisher signature verification.
-- 38 automated tests passed, including configuration, rollback, quoting,
-  scoped TOML, local-file edits, and bounded installer/process waits.
-- Setup preview inspected; no provisioning was triggered by preview.
-- Final candidate built with compiler warnings treated as errors. Its exact
-  digest is recorded in `dist/build-receipt.json`.
+- The two new recovery regressions failed against 1.0.1 before the fix:
+  transient `0x800B010A` was immediately rejected, and persistent failure did
+  not receive a bounded retry or actionable recovery instructions.
+- All four new recovery/security cases pass with 1.0.2: transient success,
+  persistent rejection, final trust-error reporting and publisher rejection.
+  Existing non-chain-error cases also assert that they are never retried.
+- Connected full-suite run: **41 passed, 1 failed**. The failure is the real
+  installed RustDesk 1.4.3+60 client: Windows returns `0x800B010C`, and
+  `Get-AuthenticodeSignature` reports "A certificate was explicitly revoked
+  by its issuer." Setup correctly rejects that client; it was not altered.
+  Installed signer thumbprint: `A1F862FCF587F99320D14368186428E8E3489E8F`.
+- The official bundled RustDesk 1.5.0 passes its pinned SHA-256 and native
+  publisher trust checks with certificate retrieval available. SHA-256:
+  `8555777215510d83d2d61c9dc984e4fcc838bd7e79f9d18a42585431f5e8bb47`.
+- With network retrieval blocked, the same bundled file reproduces the
+  screenshot's `0x800B010A` and remains rejected after the retry. This verifies
+  fail-closed behavior, not an offline-installation fix. The customer PC's
+  exact network/trust cause remains unconfirmed.
+- 1.0.2 builds with compiler warnings treated as errors. Output SHA-256:
+  `8a786c14eb4168427dfaa00c15a084ddb99d604995513a373e06bc1d0441d756`.
+  The local receipt is `dist/build-receipt.json`; generated binaries and test
+  output are excluded from Git. The Touch365 wrapper remains unsigned.
+- Independent source/security reviews found no trust-policy regression.
+  No customer provisioning, preview or remote-access session was started.
 
-## In progress
+## Earlier 1.0.1 history (not acceptance of 1.0.2)
 
 - Customer reported version 1.0.0 stopped with "The RustDesk publisher signature
   could not be verified. Contact Touch365." The old message omitted the native

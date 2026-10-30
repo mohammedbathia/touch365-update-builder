@@ -563,6 +563,71 @@ internal static class EngineTests
 
     private static void SignatureTests()
     {
+        Test("a transient chain-building failure retries unchanged Windows trust before publisher lookup", delegate
+        {
+            var calls = new List<string>();
+            Signature.RequireOfficial(FixtureExe, "bundled installer", delegate(string path, uint flags)
+            {
+                Assert(flags == 0, "The retry weakened Windows trust policy.");
+                calls.Add("trust");
+                return calls.Count == 1 ? unchecked((int)0x800B010AU) : 0;
+            }, delegate(string path)
+            {
+                calls.Add("publisher");
+                return "PURSLANE";
+            });
+            Assert(calls.SequenceEqual(new[] { "trust", "trust", "publisher" }), "The transient chain failure did not recover through a second successful trust check.");
+        });
+
+        Test("a persistent chain-building failure stays blocked and gives recovery steps", delegate
+        {
+            int trustCalls = 0;
+            bool publisherCalled = false;
+            Exception exception = Throws(delegate
+            {
+                Signature.RequireOfficial(FixtureExe, "bundled installer", delegate(string path, uint flags)
+                {
+                    trustCalls++;
+                    Assert(flags == 0, "Persistent failure caused weaker trust policy.");
+                    return unchecked((int)0x800B010AU);
+                }, delegate(string path) { publisherCalled = true; return "PURSLANE"; });
+            });
+            Assert(trustCalls == 2 && !publisherCalled, "Persistent failure was not bounded to two failed trust checks.");
+            Assert(exception.Message.Contains("0x800B010A") && exception.Message.Contains("bundled installer"), "The original failure identity was lost.");
+            Assert(exception.Message.Contains("internet") && exception.Message.Contains("date and time") && exception.Message.Contains("Retry setup"), "The chain failure has no customer recovery steps.");
+            Assert(!exception.Message.Contains(FixtureExe), "Recovery diagnostics exposed a full local path.");
+        });
+
+        Test("the retry's final trust error is reported without a publisher lookup", delegate
+        {
+            int trustCalls = 0;
+            bool publisherCalled = false;
+            Exception exception = Throws(delegate
+            {
+                Signature.RequireOfficial(FixtureExe, "retry fixture", delegate(string path, uint flags)
+                {
+                    trustCalls++;
+                    return trustCalls == 1 ? unchecked((int)0x800B010AU) : unchecked((int)0x80096010U);
+                }, delegate(string path) { publisherCalled = true; return "PURSLANE"; });
+            });
+            Assert(trustCalls == 2 && !publisherCalled, "The retry accepted a failed native trust result.");
+            Assert(exception.Message.Contains("0x80096010") && !exception.Message.Contains("0x800B010A"), "The retry hid the final Windows trust error.");
+        });
+
+        Test("recovery from a chain failure still rejects a different publisher", delegate
+        {
+            int trustCalls = 0;
+            Exception exception = Throws(delegate
+            {
+                Signature.RequireOfficial(FixtureExe, "retry publisher fixture", delegate(string path, uint flags)
+                {
+                    trustCalls++;
+                    return trustCalls == 1 ? unchecked((int)0x800B010AU) : 0;
+                }, delegate(string path) { return "UNEXPECTED FIXTURE PUBLISHER"; });
+            });
+            Assert(trustCalls == 2 && exception.Message.Contains("unexpected publisher"), "The retry bypassed the expected publisher check.");
+        });
+
         Test("publisher verification can obtain a missing certificate chain instead of forcing cache-only", delegate
         {
             int trustCalls = 0;
@@ -587,12 +652,14 @@ internal static class EngineTests
             uint capturedStatus = status;
             Test("nonzero trust status 0x" + capturedStatus.ToString("X8") + " fails before publisher lookup with safe diagnostics", delegate
             {
+                int trustCalls = 0;
                 bool publisherCalled = false;
                 string stage = "bundled installer fixture";
                 Exception exception = Throws(delegate
                 {
                     Signature.RequireOfficial(FixtureExe, stage, delegate(string path, uint flags)
                     {
+                        trustCalls++;
                         return unchecked((int)capturedStatus);
                     }, delegate(string path)
                     {
@@ -601,6 +668,7 @@ internal static class EngineTests
                     });
                 });
                 Assert(exception is InvalidDataException, "Nonzero trust status was not rejected.");
+                Assert(trustCalls == 1, "A non-chain trust failure was retried.");
                 Assert(!publisherCalled, "Publisher lookup ran before Windows trust succeeded.");
                 Assert(exception.Message.Contains(stage), "Failure did not identify the verification stage.");
                 Assert(exception.Message.Contains(Path.GetFileName(FixtureExe)), "Failure did not identify the filename.");

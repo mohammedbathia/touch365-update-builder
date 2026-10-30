@@ -2,7 +2,7 @@ TOUCH365 REMOTE SUPPORT
 Windows 10/11, 64-bit
 
 FIRST TIME
-1. Open Touch365-Remote-Support-Setup-1.0.1.exe.
+1. Open Touch365-Remote-Support-Setup-1.0.2.exe.
 2. Approve the Windows administrator prompt. If you do not have administrator
    access, your IT administrator must approve this first setup.
 3. RustDesk opens automatically. Wait for Ready and give Touch365 your ID.
@@ -29,5 +29,11 @@ session while RustDesk's main window is open and you accept the request.
 Windows may show an unknown publisher warning for the Touch365 setup wrapper;
 the bundled RustDesk application is signed by its publisher, PURSLANE.
 
-Version 1.0.1 was tested by Touch365 and reported to work well. Report any setup
-error to Touch365; do not enter any passwords into a support chat.
+IF WINDOWS CANNOT BUILD THE CERTIFICATE CHAIN (0x800B010A)
+Setup retries the Windows signature check once. If it still fails, connect this
+PC to the internet, check its date and time, then choose Retry setup. If the
+error continues, send the full message to Touch365. Setup must stay blocked
+until Windows verifies the signature; do not disable signature checks.
+
+Version 1.0.2 is a source candidate awaiting customer-PC acceptance. Report any
+setup error to Touch365; do not enter any passwords into a support chat.

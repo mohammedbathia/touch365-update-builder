@@ -4,11 +4,21 @@ Single-file Windows x64 bootstrapper wrapping the official, unmodified RustDesk
 1.5.0 portable installer. Built with the Windows .NET Framework compiler; no
 additional .NET download or PowerShell execution is required on customer PCs.
 
-Current version: **1.0.1**. Use `dist/Touch365-Remote-Support-Setup-1.0.1.exe`.
-The original 1.0.0 build reported a customer-PC signature-check failure. Version
-1.0.1 allows normal Windows certificate retrieval and includes the exact native
-trust status and verification stage in failures. The operator confirmed that
-1.0.1 completes on the test PC and works well, and authorized its GitHub release.
+Current source candidate: **1.0.2**. Build output:
+`dist/Touch365-Remote-Support-Setup-1.0.2.exe`. This candidate has not been
+published as a release or accepted on the affected customer PC.
+
+Version 1.0.1 added normal Windows certificate retrieval and exact trust errors.
+The later customer screenshot reports `0x800B010A` (certificate-chain building
+failed). Version 1.0.2 retries that specific error once, after one second, with
+the same Windows Authenticode policy. A retry must succeed before the publisher
+check or setup can continue. Persistent failures stay blocked and explain how to
+retry after checking the PC's internet connection and date/time.
+
+This does not supply new trusted roots, import certificates, change Windows
+security settings or accept an untrusted signature. A machine with unavailable
+certificate retrieval or missing trust still needs its administrator's attention.
+The affected customer PC's exact cause remains unconfirmed; see `TEST-STATUS.md`.
 
 ## Customer flow
 
