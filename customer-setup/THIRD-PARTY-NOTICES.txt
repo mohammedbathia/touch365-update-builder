@@ -1,0 +1,18 @@
+Touch365 Remote Support Setup includes unmodified RustDesk 1.5.0 for Windows x64.
+
+RustDesk copyright: RustDesk contributors.
+License: GNU Affero General Public License, version 3 (AGPL-3.0).
+License text: RustDesk-LICENSE.txt, also embedded in the setup executable.
+Project: https://github.com/rustdesk/rustdesk
+Exact release: https://github.com/rustdesk/rustdesk/releases/tag/1.5.0
+Corresponding source tree: https://github.com/rustdesk/rustdesk/tree/1.5.0
+Source archive: https://github.com/rustdesk/rustdesk/archive/refs/tags/1.5.0.zip
+Build instructions: https://rustdesk.com/docs/en/dev/build/windows/
+Submodules/dependencies are identified in the source tree and its build files.
+
+Official binary SHA-256:
+8555777215510d83d2d61c9dc984e4fcc838bd7e79f9d18a42585431f5e8bb47
+
+The Touch365 setup wrapper configures RustDesk; it is not a modified RustDesk
+client or a RustDesk Server Pro custom client. It contains only public server
+configuration. It does not include server private keys or support passwords.

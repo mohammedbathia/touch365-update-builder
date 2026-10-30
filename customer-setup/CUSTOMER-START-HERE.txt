@@ -1,0 +1,33 @@
+TOUCH365 REMOTE SUPPORT
+Windows 10/11, 64-bit
+
+FIRST TIME
+1. Open Touch365-Remote-Support-Setup-1.0.1.exe.
+2. Approve the Windows administrator prompt. If you do not have administrator
+   access, your IT administrator must approve this first setup.
+3. RustDesk opens automatically. Wait for Ready and give Touch365 your ID.
+4. Check the incoming request and click Accept when your technician connects.
+
+There are no server details or RustDesk settings to enter.
+You approve each new connection. No support password is requested or created.
+
+NEXT TIME
+Open Touch365 Remote Support from the Start menu, wait for Ready, then share
+your ID with your technician and accept their request.
+Keep the RustDesk main window open while requesting support.
+Either person can disconnect when support is finished.
+
+IF RUSTDESK IS ALREADY RUNNING
+Finish any current support session, choose Quit RustDesk from the RustDesk
+tray icon, then click Retry setup. Setup does not close an active session.
+
+WHAT SETUP DOES
+Installs official RustDesk if needed, or configures a compatible existing
+installation for Touch365. It enables customer-approved screen control,
+clipboard sharing and file transfer. Your technician can only start a new
+session while RustDesk's main window is open and you accept the request.
+Windows may show an unknown publisher warning for the Touch365 setup wrapper;
+the bundled RustDesk application is signed by its publisher, PURSLANE.
+
+Version 1.0.1 was tested by Touch365 and reported to work well. Report any setup
+error to Touch365; do not enter any passwords into a support chat.
