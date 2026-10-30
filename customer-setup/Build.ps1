@@ -1,4 +1,4 @@
-param([string]$PayloadPath)
+param([string]$PayloadPath, [string]$UpdateTrustPath)
 $ErrorActionPreference = 'Stop'
 $setupRoot = $PSScriptRoot
 $projectRoot = Split-Path $setupRoot -Parent
@@ -19,16 +19,25 @@ New-Item -ItemType Directory -Path $build -Force | Out-Null
 $embeddedPayload = Join-Path $build 'rustdesk-1.5.0-x86_64.exe'
 Copy-Item -LiteralPath $payload.FullName -Destination $embeddedPayload -Force
 if ((Get-FileHash -LiteralPath $embeddedPayload).Hash -ne (Get-FileHash -LiteralPath $payload.FullName).Hash) { throw 'Payload staging verification failed.' }
-$output = Join-Path $dist 'Touch365-Remote-Support-Setup-1.0.2.exe'
+$output = Join-Path $dist 'Touch365-Remote-Support-Setup-1.1.0.exe'
 $sources = Get-ChildItem -LiteralPath (Join-Path $setupRoot 'src') -Filter '*.cs' | Select-Object -ExpandProperty FullName
-$compileArgs = @('/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/warnaserror+', '/langversion:5', "/win32manifest:$(Join-Path $setupRoot 'app.manifest')", "/out:$output", "/resource:$embeddedPayload,RustDeskPayload", "/resource:$(Join-Path $setupRoot 'RustDesk-LICENSE.txt'),RustDeskLicense", "/resource:$(Join-Path $setupRoot 'THIRD-PARTY-NOTICES.txt'),ThirdPartyNotices", '/r:System.dll', '/r:System.Core.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', '/r:System.Management.dll', '/r:System.ServiceProcess.dll', '/r:System.Xml.dll', '/r:System.Xml.Linq.dll', '/r:Microsoft.CSharp.dll') + $sources
+$compileArgs = @('/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/warnaserror+', '/langversion:5', "/win32manifest:$(Join-Path $setupRoot 'app.manifest')", "/out:$output", "/resource:$embeddedPayload,RustDeskPayload", "/resource:$(Join-Path $setupRoot 'RustDesk-LICENSE.txt'),RustDeskLicense", "/resource:$(Join-Path $setupRoot 'THIRD-PARTY-NOTICES.txt'),ThirdPartyNotices", '/r:System.dll', '/r:System.Core.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', '/r:System.Management.dll', '/r:System.ServiceProcess.dll', '/r:System.Xml.dll', '/r:System.Xml.Linq.dll', '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll', '/r:Microsoft.CSharp.dll') + $sources
+if ($UpdateTrustPath) {
+    $trustProfile = Get-Item -LiteralPath $UpdateTrustPath
+    if ($trustProfile.Length -lt 1 -or $trustProfile.Length -gt 16384) { throw 'Invalid public update trust profile size.' }
+    $compileArgs += ('/resource:' + $trustProfile.FullName + ',UpdaterTrust')
+}
 & $compiler @compileArgs
 if ($LASTEXITCODE -ne 0) { throw 'The setup build failed.' }
+if ($UpdateTrustPath) {
+    $trustValidation = Start-Process -FilePath $output -ArgumentList '--validate-update-trust' -WindowStyle Hidden -Wait -PassThru
+    if ($trustValidation.ExitCode -ne 0) { throw 'The embedded public update trust profile was rejected.' }
+}
 $receipt = [ordered]@{
-    Product = 'Touch365 Remote Support Setup'; Version = '1.0.2'; BuiltUtc = [DateTime]::UtcNow.ToString('o')
+    Product = 'Touch365 Remote Support Setup'; Version = '1.1.0'; BuiltUtc = [DateTime]::UtcNow.ToString('o')
     File = (Split-Path $output -Leaf); SHA256 = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash
     RustDeskVersion = '1.5.0'; RustDeskSHA256 = (Get-FileHash -LiteralPath $payload.FullName -Algorithm SHA256).Hash
-    RustDeskSignature = $signature.Status.ToString(); SetupSigned = $false
+    RustDeskSignature = $signature.Status.ToString(); SetupSigned = $false; UpdateTrustConfigured = [bool]$UpdateTrustPath
 }
 $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dist 'build-receipt.json') -Encoding utf8
 Copy-Item -LiteralPath $output -Destination (Join-Path $dist 'Touch365-Remote-Support-Setup.exe') -Force

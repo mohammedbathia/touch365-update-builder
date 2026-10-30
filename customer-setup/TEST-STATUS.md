@@ -1,9 +1,53 @@
 # Verification status - 30 October 2026
 
-Current source candidate: Touch365 Remote Support Setup 1.0.2.
+Current source candidate: Touch365 Remote Support Setup 1.1.0.
 Source update only: no release publication, deployment or installation performed.
 
-## Candidate results
+## Updater candidate verification
+
+- `./tests/Test-Updater.ps1`: **80 passed, 0 failed** (16 protocol, 17 package,
+  22 coordinator, 22 Windows filesystem and 3 elevated-handoff fixtures). The full application
+  also compiles with C# 5/compiler warnings treated as errors. Tests execute
+  only isolated fixtures and the read-only disabled-channel validation mode.
+- The previously failing application ACL-copy fixture now passes. Existing
+  access descriptors are copied through fresh security objects; new resources
+  inherit the original application's read permissions instead of private
+  staging permissions. Original directories/ACLs remain retained for recovery.
+- Ordinary setup now checks protected updater state under the shared maintenance
+  lock before preparing RustDesk. Pending journals and missing/corrupt enrolled
+  state block setup without changing the journal. Both guard cases pass.
+- Enrollment and every update require the existing click-only/window-open/custom
+  approval policy; merged and read-back configuration must preserve it. Tests
+  reject weak enrollment policy and later drift before a partial config update.
+- Elevated handoff validates canonical local fixed-drive ordinary files before
+  filesystem access. UNC/device paths, ADS, reserved names and path aliases are
+  rejected. The controller clears consumed updates after verified completion.
+- Actual public-only RSA/SHA-256 verification passes the published RFC 7515
+  known-answer vector and rejects altered bytes. Manifest parsing and host
+  transactions use deterministic internal fixture seams, not a production
+  signing key or live feed. No signing key or credential was generated.
+- Full 1.1.0 payload build passed against pinned official RustDesk 1.5.0, whose
+  Windows signature is `Valid`. Output SHA-256:
+  `8add8eeab1e65bedab3cbb0125cbd7f98c7bab5262930c872ba86d7fd5d708f4`.
+  The local receipt is `dist/build-receipt.json`; generated binaries remain
+  excluded from Git. The Touch365 wrapper is unsigned.
+- The built candidate's `--validate-update-trust` returns **2 (disabled)**.
+  `UpdateTrustConfigured` is false. No production feed or pinned public key is
+  provisioned, so there is no live automatic updating or enrollment.
+- Refreshed original engine suite: **41 passed, 1 failed**. The unchanged real
+  installed RustDesk 1.4.3+60 is still rejected with `0x800B010C` (revoked
+  certificate). This is separate from the embedded 1.5.0 payload, which passes.
+- A Windows CI workflow compiles the complete source and runs updater fixtures
+  without downloading/installing RustDesk. CI delivery/results are reported
+  against the pushed commit; a local test result is not a CI result.
+
+Remaining activation requirements are in [`UPDATER.md`](UPDATER.md): approve a
+target and signed feed/package producer, provision public verification trust
+out of band, explicitly authorize enrollment, and complete controlled machine
+and interrupted-update acceptance. No service/task registration, persistent
+security access, release, deployment or remote-access session was performed.
+
+## Preserved 1.0.2 certificate-fix evidence
 
 - The two new recovery regressions failed against 1.0.1 before the fix:
   transient `0x800B010A` was immediately rejected, and persistent failure did

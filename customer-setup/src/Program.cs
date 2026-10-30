@@ -15,8 +15,8 @@ using System.Xml.Linq;
 [assembly: AssemblyDescription("Customer-approved RustDesk setup for Touch365")]
 [assembly: AssemblyCompany("Touch365")]
 [assembly: AssemblyProduct("Touch365 Remote Support")]
-[assembly: AssemblyVersion("1.0.2.0")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace Touch365Support
 {
@@ -26,6 +26,8 @@ namespace Touch365Support
         [STAThread]
         private static int Main(string[] args)
         {
+            int updateResult;
+            if (UpdateCommands.TryRun(args, out updateResult)) return updateResult;
             if (args.Length == 2 && args[0] == "--worker") return Worker(args[1]);
             bool preview = args.Length == 1 && args[0] == "--preview";
             if (args.Length != 0 && !preview) return 2;
@@ -119,8 +121,10 @@ namespace Touch365Support
             if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator)) return 3;
             string folder = Path.Combine(Root, id);
             WindowsHost host = null;
+            IDisposable maintenance = null;
             try
             {
+                maintenance = MaintenanceLock.Acquire();
                 SafeFiles.PrivateDirectory(Root, true);
                 if (Directory.Exists(folder)) return 4;
                 SafeFiles.PrivateDirectory(folder, true);
@@ -128,6 +132,7 @@ namespace Touch365Support
                 ExtractNotice(folder, "ThirdPartyNotices", "THIRD-PARTY-NOTICES.txt");
                 Action<string> progress = delegate(string value) { File.WriteAllText(Path.Combine(folder, "status.txt"), value, new UTF8Encoding(false)); };
                 progress("Checking this PC...");
+                WindowsUpdateEnvironment.RequireSetupReady();
                 host = new WindowsHost(folder, progress);
                 string exe = host.Prepare();
                 Provisioner.Apply(host, progress);
@@ -145,6 +150,7 @@ namespace Touch365Support
                 if (Directory.Exists(folder)) { try { WriteResult(folder, false, message, ""); } catch { } }
                 return 1;
             }
+            finally { if (maintenance != null) maintenance.Dispose(); }
         }
 
         private static void WriteResult(string folder, bool success, string message, string exe)

@@ -1,0 +1,36 @@
+name: Remote Support updater
+
+'on':
+  push:
+    paths:
+      - 'customer-setup/**'
+      - '.github/workflows/remote-support-updater.yml'
+  pull_request:
+    paths:
+      - 'customer-setup/**'
+      - '.github/workflows/remote-support-updater.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-support-updater-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  updater-tests:
+    name: Compile and test updater fixtures
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compile and test isolated updater fixtures
+        env:
+          T365_UPDATER_TEST_ROOT: ${{ runner.temp }}\touch365-updater-tests
+        run: ./customer-setup/tests/Test-Updater.ps1

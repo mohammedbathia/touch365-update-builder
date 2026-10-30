@@ -10,9 +10,12 @@ Customers open this setup, approve the Windows administrator prompt, then share 
 
 [Release notes, technician guide, checksums and source](https://github.com/mohammedbathia/touch365-update-builder/releases/tag/remote-support-v1.0.1).
 
-The [Remote Support source](customer-setup/README.md) now includes the 1.0.2
-candidate's bounded certificate-chain retry and recovery instructions. This is
-a source update; the published 1.0.1 installer has not been replaced.
+The [Remote Support source](customer-setup/README.md) includes the 1.1.0
+candidate's authenticated, approval-gated application/configuration updater
+and the preserved certificate-chain retry. The updater is disabled until an
+approved public signing trust/feed is provisioned. See the
+[updater design and activation prerequisites](customer-setup/UPDATER.md).
+This is a source update; the published 1.0.1 installer has not been replaced.
 
 ## Update Builder
 
