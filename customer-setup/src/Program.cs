@@ -15,8 +15,8 @@ using System.Xml.Linq;
 [assembly: AssemblyDescription("Customer-approved RustDesk setup for Touch365")]
 [assembly: AssemblyCompany("Touch365")]
 [assembly: AssemblyProduct("Touch365 Remote Support")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace Touch365Support
 {

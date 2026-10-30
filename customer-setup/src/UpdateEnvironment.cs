@@ -87,6 +87,11 @@ namespace Touch365Support
         private readonly Action<string, UpdateManifest> verify;
         private readonly Action requireTarget;
         private readonly bool fixture;
+        private readonly Action<string, string> requireProfile;
+        private readonly Func<string> profileSnapshot;
+        private string targetMode = UpdateState.ServiceManaged;
+        private string profileSid = "", profileRoot = "";
+        private bool bindingPinned;
         private bool locked;
         private string preparedId;
 
@@ -104,6 +109,8 @@ namespace Touch365Support
                 return ReadVersion(executable);
             };
             verify = UpdatePackage.VerifyDirectory;
+            requireProfile = UpdateProfile.RequireBinding;
+            profileSnapshot = delegate { return UpdateProfile.Snapshot(profileRoot); };
         }
 
         // This seam is used only by isolated filesystem tests. No command-line or
@@ -119,11 +126,42 @@ namespace Touch365Support
             verify = verifyDirectory;
             requireTarget = delegate { SafeFiles.NoReparse(application); SafeFiles.NoReparse(configuration); };
             fixture = true;
+            requireProfile = delegate { throw new InvalidOperationException("This fixture has no user-profile target."); };
+            profileSnapshot = delegate { throw new InvalidOperationException("This fixture has no user-profile target."); };
+        }
+
+        // App-only fixtures supply only isolated target/profile adapters. Production
+        // never accepts a profile path or a weaker verifier from command arguments.
+        internal WindowsUpdateEnvironment(string stateRoot, string applicationDirectory, string configPath,
+            Func<bool> isIdle, Func<Version> installedVersion, Action<string, UpdateManifest> verifyDirectory,
+            string userSid, string userProfileRoot, Action<string, string> verifyProfile, Func<string> snapshot,
+            Func<bool> serviceExists, bool adoptProtectedBinding = false)
+            : this(stateRoot, applicationDirectory, configPath, isIdle, installedVersion, verifyDirectory)
+        {
+            targetMode = UpdateState.AppOnly; profileSid = userSid; profileRoot = Path.GetFullPath(userProfileRoot); bindingPinned = true;
+            if (adoptProtectedBinding) { targetMode = UpdateState.ServiceManaged; profileSid = profileRoot = ""; bindingPinned = false; }
+            requireProfile = verifyProfile; profileSnapshot = snapshot;
+            requireTarget = delegate {
+                SafeFiles.NoReparse(application); SafeFiles.NoReparse(root);
+                if (serviceExists()) throw new InvalidOperationException("A service appeared after app-only enrollment.");
+                RequireProfileBinding();
+            };
         }
 
         public static void Enroll(DateTime now)
         {
             var environment = new WindowsUpdateEnvironment();
+            using (environment.AcquireLock()) environment.Initialize(now);
+        }
+
+        public static void EnrollAppOnly(DateTime now, string expectedUserSid)
+        {
+            MaintenanceLock.RequireAdministrator();
+            var environment = new WindowsUpdateEnvironment();
+            environment.targetMode = UpdateState.AppOnly;
+            environment.profileSid = expectedUserSid;
+            environment.profileRoot = UpdateProfile.Resolve(expectedUserSid);
+            environment.bindingPinned = true;
             using (environment.AcquireLock()) environment.Initialize(now);
         }
 
@@ -148,7 +186,7 @@ namespace Touch365Support
             RequireIdle();
             requireTarget();
             Version installed = InstalledVersion();
-            RequireConsentPolicy(ReadBytes(configuration, 1048576));
+            RequireCurrentPolicy();
             MakePrivateDirectory(root, true); // Read-only status is not secret; backups are private below.
             string marker = Path.Combine(root, "enrolled.marker");
             if (File.Exists(marker) || File.Exists(StatePath))
@@ -156,7 +194,8 @@ namespace Touch365Support
             WriteNew(marker, Encoding.UTF8.GetBytes("Touch365 updater enrollment version 1\r\n"));
             SaveState(new UpdateState {
                 Enrolled = true, SeenSequence = 0, SeenDigest = "", LastSeenUtc = now.ToUniversalTime(),
-                HighestBinaryVersion = installed, HighestConfigVersion = 0, AppliedSequence = 0
+                HighestBinaryVersion = installed, HighestConfigVersion = 0, AppliedSequence = 0,
+                TargetMode = targetMode, ProfileSid = profileSid, ProfileRoot = profileRoot
             });
         }
 
@@ -190,6 +229,7 @@ namespace Touch365Support
                 var document = ReadXml(StatePath, 262144);
                 var state = UpdateState.FromXml(document);
                 if (!state.Enrolled) throw new InvalidDataException("Enrollment is not valid.");
+                BindState(state);
                 return state;
             }
             catch (Exception ex)
@@ -204,11 +244,15 @@ namespace Touch365Support
         {
             RequireLock();
             if (state == null || !state.Enrolled) throw new InvalidDataException("Updater state must remain enrolled.");
+            RequireSameBinding(state);
             SafeFiles.NoReparse(StatePath);
             if (!File.Exists(Path.Combine(root, "enrolled.marker"))) throw new InvalidOperationException("Updater is not enrolled.");
             if (File.Exists(StatePath))
             {
                 UpdateState previous = LoadState();
+                if (previous.TargetMode != state.TargetMode || previous.ProfileSid != state.ProfileSid
+                    || !String.Equals(previous.ProfileRoot, state.ProfileRoot, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Updater target/profile binding cannot change after enrollment.");
                 if (state.SeenSequence < previous.SeenSequence || state.HighestConfigVersion < previous.HighestConfigVersion
                     || (previous.HighestBinaryVersion != null && (state.HighestBinaryVersion == null || state.HighestBinaryVersion < previous.HighestBinaryVersion))
                     || state.LastSeenUtc < previous.LastSeenUtc)
@@ -225,12 +269,49 @@ namespace Touch365Support
 
         public Version InstalledVersion() { requireTarget(); return version(); }
 
+        private bool AppOnly { get { return targetMode == UpdateState.AppOnly; } }
+        private void RequireProfileBinding()
+        { if (AppOnly) requireProfile(profileSid, profileRoot); }
+        private void BindState(UpdateState state)
+        {
+            if (bindingPinned) RequireSameBinding(state);
+            targetMode = state.TargetMode; profileSid = state.ProfileSid; profileRoot = state.ProfileRoot;
+            bindingPinned = true;
+            RequireProfileBinding();
+        }
+        private void RequireSameBinding(UpdateState state)
+        {
+            if (state.TargetMode != targetMode || state.ProfileSid != profileSid
+                || !String.Equals(state.ProfileRoot, profileRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Updater target/profile binding cannot change after enrollment.");
+            RequireProfileBinding();
+        }
+        private void RequireCurrentPolicy()
+        {
+            if (AppOnly) { CurrentConfig(); return; } // Fingerprint only; never rewrite a user's policy.
+            RequireConsentPolicy(ReadBytes(configuration, 1048576));
+        }
+        private void RequireManifestTarget(UpdateManifest manifest)
+        {
+            ValidateManifestConfiguration(manifest);
+            if (!AppOnly) return;
+            if (manifest.BinaryVersion == null || manifest.ConfigVersion != 0 || manifest.Options.Count != 0)
+                throw new InvalidDataException("This PC is enrolled for app-only updates. Configuration-bearing updates are not permitted.");
+            UpdatePackage.RequireCompleteApplication(manifest);
+        }
+        internal static void RequireNewApplicationPackage(UpdateManifest manifest)
+        {
+            if (manifest != null && manifest.BinaryVersion != null) UpdatePackage.RequireCompleteApplication(manifest);
+        }
+
         public string PrepareBackup(UpdateManifest manifest)
         {
             RequireLock(); RequireIdle(); requireTarget();
-            ValidateManifestConfiguration(manifest);
+            RequireManifestTarget(manifest);
+            if (!fixture) RequireNewApplicationPackage(manifest);
             InstalledVersion(); // Configuration also requires a currently trusted installed client.
-            RequireConsentPolicy(ReadBytes(configuration, 1048576));
+            RequireCurrentPolicy();
+            string originalConfig = CurrentConfig();
             if (!Directory.Exists(application)) throw new InvalidOperationException("A managed RustDesk installation is required before updating.");
             string id = Guid.NewGuid().ToString("N");
             string directory = Transaction(id);
@@ -243,9 +324,10 @@ namespace Touch365Support
             if (UpdatePackage.Fingerprint(application) != originalApplicationHash
                 || UpdatePackage.Fingerprint(Path.Combine(directory, "application-before")) != originalApplicationHash)
                 throw new IOException("RustDesk changed while its update backup was prepared. No update was applied.");
-            bool existed = File.Exists(configuration);
+            RequireConfiguration(originalConfig);
+            bool existed = !AppOnly && File.Exists(configuration);
             byte[] before = existed ? ReadBytes(configuration, 1048576) : null;
-            RequireConsentPolicy(before);
+            if (!AppOnly) RequireConsentPolicy(before);
             byte[] after = before;
             if (manifest.ConfigVersion > 0)
             {
@@ -255,14 +337,17 @@ namespace Touch365Support
                     text = ConfigText.SetOption(text, option.Key, option.Value);
                 after = new UTF8Encoding(false).GetBytes(text);
             }
-            RequireConsentPolicy(after);
+            if (!AppOnly) RequireConsentPolicy(after);
             if (before != null) WriteNew(Path.Combine(directory, "configuration-before"), before);
             if (after != null) WriteNew(Path.Combine(directory, "configuration-after"), after);
             var backup = new Backup {
                 Id = id, Digest = manifest.Digest, AppBefore = originalApplicationHash,
                 AppAfter = manifest.BinaryVersion == null ? originalApplicationHash : "",
-                ConfigBefore = before == null ? "absent" : Digest(before),
-                ConfigAfter = after == null ? "absent" : Digest(after)
+                ConfigBefore = AppOnly ? originalConfig : (before == null ? "absent" : Digest(before)),
+                ConfigAfter = AppOnly ? originalConfig : (after == null ? "absent" : Digest(after)),
+                TargetMode = targetMode, ProfileSid = profileSid, ProfileRoot = profileRoot,
+                RetainedShortcut = manifest.BinaryVersion != null && !String.IsNullOrEmpty(manifest.PackageLayout)
+                    ? ShortcutDigest(application) : ""
             };
             SaveBackup(backup);
             preparedId = id;
@@ -271,7 +356,8 @@ namespace Touch365Support
 
         public void Apply(UpdateManifest manifest, string stagedDirectory, string backupId)
         {
-            RequireLock(); RequireIdle(); requireTarget(); ValidateManifestConfiguration(manifest);
+            RequireLock(); RequireIdle(); requireTarget(); RequireManifestTarget(manifest);
+            if (!fixture) RequireNewApplicationPackage(manifest);
             Backup backup = LoadBackup(backupId, manifest.Digest);
             RequireOriginal(backup);
             if (manifest.BinaryVersion != null)
@@ -283,10 +369,11 @@ namespace Touch365Support
                 if (Directory.Exists(replacement) || Directory.Exists(retained))
                     throw new IOException("An earlier update directory needs recovery before another update can be applied.");
                 UpdatePackage.CopyVerified(stagedDirectory, replacement);
+                CopyRetainedShortcut(application, replacement, backup.RetainedShortcut);
                 ProtectOwnedTree(replacement);
                 PreserveApplicationAccess(application, replacement);
                 if (!fixture) VerifyProtectedTree(replacement);
-                verify(replacement, manifest);
+                VerifyReplacement(replacement, manifest, backup.RetainedShortcut);
                 FlushTree(replacement);
                 backup.AppAfter = UpdatePackage.Fingerprint(replacement);
                 SaveBackup(backup); // Durable expected bytes before either directory moves.
@@ -312,11 +399,12 @@ namespace Touch365Support
         {
             try
             {
+                requireTarget(); RequireManifestTarget(manifest);
                 Backup backup = CurrentBackup(manifest);
                 if (String.IsNullOrEmpty(backup.AppAfter) || !Directory.Exists(application)
                     || UpdatePackage.Fingerprint(application) != backup.AppAfter || CurrentConfig() != backup.ConfigAfter) return false;
-                RequireConsentPolicy(ReadBytes(configuration, 1048576));
-                if (manifest.BinaryVersion != null) verify(application, manifest);
+                RequireCurrentPolicy();
+                if (manifest.BinaryVersion != null) VerifyReplacement(application, manifest, backup.RetainedShortcut);
                 return true;
             }
             catch { return false; }
@@ -324,7 +412,7 @@ namespace Touch365Support
 
         public void Restore(UpdateManifest manifest, string backupId)
         {
-            RequireLock(); RequireIdle(); requireTarget();
+            RequireLock(); RequireIdle(); requireTarget(); RequireManifestTarget(manifest);
             Backup backup = LoadBackup(backupId, manifest.Digest);
             string currentConfig = CurrentConfig();
             if (currentConfig != backup.ConfigBefore && currentConfig != backup.ConfigAfter)
@@ -341,7 +429,9 @@ namespace Touch365Support
             }
             else if (retainedExists)
                 throw new InvalidOperationException("Ambiguous duplicate installation directories require administrator recovery.");
-            if (currentConfig != backup.ConfigBefore)
+            if (AppOnly && currentConfig != backup.ConfigBefore)
+                throw new InvalidOperationException("The user profile changed outside this update. Recovery preserves it and requires administrator review.");
+            if (!AppOnly && currentConfig != backup.ConfigBefore)
             {
                 RequireIdle();
                 if (backup.ConfigBefore == "absent")
@@ -369,6 +459,7 @@ namespace Touch365Support
         {
             try
             {
+                requireTarget();
                 Backup backup = LoadBackup(backupId, null);
                 return Directory.Exists(application) && UpdatePackage.Fingerprint(application) == backup.AppBefore && CurrentConfig() == backup.ConfigBefore;
             }
@@ -378,23 +469,24 @@ namespace Touch365Support
         private void ValidateWindowsTarget()
         {
             MaintenanceLock.RequireAdministrator();
-            SafeFiles.NoReparse(application); SafeFiles.NoReparse(configuration); SafeFiles.NoReparse(root);
+            SafeFiles.NoReparse(application); SafeFiles.NoReparse(root);
+            if (AppOnly) RequireProfileBinding(); else SafeFiles.NoReparse(configuration);
             InstalledClient client = WindowsHost.Inspect();
-            if (!client.Registered || client.Msi || !client.ServiceExists || client.Exe == null
+            if (!client.Registered || client.Msi || client.ServiceExists == AppOnly || client.Exe == null
                 || !String.Equals(Path.GetFullPath(client.Exe), Path.Combine(application, "RustDesk.exe"), StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Automatic file updates require the existing standard Program Files RustDesk EXE installation. MSI, custom, incomplete or conflicting installations require separate maintenance.");
+                throw new InvalidOperationException("Updates require the enrolled standard Program Files RustDesk EXE installation and unchanged service mode. MSI, custom, incomplete or conflicting installations require separate maintenance.");
         }
 
         private bool WindowsIdle()
         {
-            using (var service = new ServiceController("RustDesk"))
+            if (!AppOnly) using (var service = new ServiceController("RustDesk"))
             {
                 service.Refresh();
                 if (service.Status != ServiceControllerStatus.Stopped) return false;
             }
             // Touch365's distributed portable client encodes its server in its
             // filename (rustdesk-host=...,.exe); it can own a session too.
-            using (var query = new ManagementObjectSearcher("SELECT Name, ProcessId FROM Win32_Process WHERE Name LIKE 'rustdesk%.exe'"))
+            using (var query = new ManagementObjectSearcher("SELECT Name, ProcessId FROM Win32_Process WHERE Name LIKE 'rustdesk%.exe' OR Name='RuntimeBroker_rustdesk.exe'"))
                 foreach (ManagementObject process in query.Get())
                 {
                     using (process) if (IsRustDeskProcessName(Convert.ToString(process["Name"]))) return false;
@@ -402,11 +494,14 @@ namespace Touch365Support
             return true;
         }
         internal static bool IsRustDeskProcessName(string name)
-        { return String.IsNullOrWhiteSpace(name) || (name.StartsWith("rustdesk", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)); }
+        { return String.IsNullOrWhiteSpace(name) || String.Equals(name, "RuntimeBroker_rustdesk.exe", StringComparison.OrdinalIgnoreCase)
+            || (name.StartsWith("rustdesk", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)); }
 
         private void RequireIdle()
         {
-            if (!IsIdle()) throw new InvalidOperationException("Update deferred. Quit RustDesk and have an administrator stop its service after all support sessions finish. Touch365 updates never stop sessions or services automatically.");
+            if (!IsIdle()) throw new InvalidOperationException(AppOnly
+                ? "Update deferred. Finish support sessions, quit RustDesk and keep its background service absent. Touch365 updates never stop sessions or change service mode automatically."
+                : "Update deferred. Quit RustDesk and have an administrator stop its service after all support sessions finish. Touch365 updates never stop sessions or services automatically.");
         }
 
         private void RequireLock() { if (!locked) throw new InvalidOperationException("The machine-wide maintenance lock is required."); }
@@ -556,7 +651,38 @@ namespace Touch365Support
         }
         private void RequireConfiguration(string expected)
         { if (CurrentConfig() != expected) throw new IOException("RustDesk configuration changed outside this update. It will not be overwritten."); }
-        private string CurrentConfig() { return File.Exists(configuration) ? Digest(ReadBytes(configuration, 1048576)) : "absent"; }
+        private string CurrentConfig()
+        {
+            if (AppOnly) { RequireProfileBinding(); return profileSnapshot(); }
+            return File.Exists(configuration) ? Digest(ReadBytes(configuration, 1048576)) : "absent";
+        }
+
+        private static string ShortcutDigest(string directory)
+        {
+            string path = Path.Combine(directory, "Uninstall RustDesk.lnk");
+            if (!File.Exists(path)) return "";
+            return Digest(ReadBytes(path, 65536));
+        }
+        private static void CopyRetainedShortcut(string previous, string replacement, string expectedHash)
+        {
+            string target = Path.Combine(replacement, "Uninstall RustDesk.lnk");
+            if (File.Exists(target)) throw new InvalidDataException("Downloaded packages cannot supply a retained uninstall shortcut.");
+            if (String.IsNullOrEmpty(expectedHash)) return;
+            byte[] bytes = ReadBytes(Path.Combine(previous, "Uninstall RustDesk.lnk"), 65536);
+            if (Digest(bytes) != expectedHash) throw new IOException("The existing uninstall shortcut changed during the update.");
+            WriteNew(target, bytes);
+        }
+        private void VerifyReplacement(string directory, UpdateManifest manifest, string retainedShortcut)
+        {
+            if (!fixture && !String.IsNullOrEmpty(manifest.PackageLayout))
+            {
+                UpdatePackage.VerifyDirectoryWithRetainedShortcut(directory, manifest, retainedShortcut);
+                return;
+            }
+            if (ShortcutDigest(directory) != (retainedShortcut ?? ""))
+                throw new InvalidDataException("The retained uninstall shortcut does not match the protected backup record.");
+            verify(directory, manifest);
+        }
 
         private Backup CurrentBackup(UpdateManifest manifest)
         {
@@ -573,13 +699,17 @@ namespace Touch365Support
         private sealed class Backup
         {
             public string Id, Digest, AppBefore, AppAfter, ConfigBefore, ConfigAfter;
+            public string TargetMode, ProfileSid, ProfileRoot, RetainedShortcut;
         }
         private void SaveBackup(Backup backup)
         {
-            var xml = new XElement("backup", new XAttribute("schema", "1"), new XAttribute("id", backup.Id),
+            RequireBackupBinding(backup);
+            var xml = new XElement("backup", new XAttribute("schema", "2"), new XAttribute("id", backup.Id),
                 new XAttribute("digest", backup.Digest), new XAttribute("applicationBefore", backup.AppBefore),
                 new XAttribute("applicationAfter", backup.AppAfter), new XAttribute("configurationBefore", backup.ConfigBefore),
-                new XAttribute("configurationAfter", backup.ConfigAfter));
+                new XAttribute("configurationAfter", backup.ConfigAfter), new XAttribute("targetMode", backup.TargetMode),
+                new XAttribute("profileSid", backup.ProfileSid), new XAttribute("profileRoot", backup.ProfileRoot),
+                new XAttribute("retainedShortcut", backup.RetainedShortcut));
             AtomicWrite(Path.Combine(Transaction(backup.Id), "backup.xml"), Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting)), null);
         }
         private Backup LoadBackup(string id, string digest)
@@ -591,18 +721,35 @@ namespace Touch365Support
                 VerifyAdministratorProtection(Transaction(id), true);
             }
             XElement xml = ReadXml(Path.Combine(Transaction(id), "backup.xml"), 16384);
-            string[] attributes = { "schema", "id", "digest", "applicationBefore", "applicationAfter", "configurationBefore", "configurationAfter" };
+            bool legacy = (string)xml.Attribute("schema") == "1";
+            string[] attributes = legacy
+                ? new[] { "schema", "id", "digest", "applicationBefore", "applicationAfter", "configurationBefore", "configurationAfter" }
+                : new[] { "schema", "id", "digest", "applicationBefore", "applicationAfter", "configurationBefore", "configurationAfter", "targetMode", "profileSid", "profileRoot", "retainedShortcut" };
             if (xml.Name != "backup" || xml.Elements().Any() || xml.Attributes().Count() != attributes.Length
                 || xml.Attributes().Any(a => !attributes.Contains(a.Name.LocalName) || a.Name.Namespace != XNamespace.None)
-                || (string)xml.Attribute("schema") != "1" || (string)xml.Attribute("id") != id)
+                || (!legacy && (string)xml.Attribute("schema") != "2") || (string)xml.Attribute("id") != id)
                 throw new InvalidDataException("The update backup record is invalid.");
             var backup = new Backup { Id = id, Digest = (string)xml.Attribute("digest"), AppBefore = (string)xml.Attribute("applicationBefore"),
-                AppAfter = (string)xml.Attribute("applicationAfter"), ConfigBefore = (string)xml.Attribute("configurationBefore"), ConfigAfter = (string)xml.Attribute("configurationAfter") };
+                AppAfter = (string)xml.Attribute("applicationAfter"), ConfigBefore = (string)xml.Attribute("configurationBefore"), ConfigAfter = (string)xml.Attribute("configurationAfter"),
+                TargetMode = legacy ? UpdateState.ServiceManaged : (string)xml.Attribute("targetMode"),
+                ProfileSid = legacy ? "" : (string)xml.Attribute("profileSid"), ProfileRoot = legacy ? "" : (string)xml.Attribute("profileRoot"),
+                RetainedShortcut = legacy ? "" : (string)xml.Attribute("retainedShortcut") };
             if (!IsHash(backup.Digest) || (digest != null && backup.Digest != digest) || !IsHash(backup.AppBefore)
                 || (!String.IsNullOrEmpty(backup.AppAfter) && !IsHash(backup.AppAfter))
                 || (backup.ConfigBefore != "absent" && !IsHash(backup.ConfigBefore)) || (backup.ConfigAfter != "absent" && !IsHash(backup.ConfigAfter)))
                 throw new InvalidDataException("The update backup record does not match the authenticated update.");
+            RequireBackupBinding(backup);
             return backup;
+        }
+
+        private void RequireBackupBinding(Backup backup)
+        {
+            if (backup.TargetMode != targetMode || backup.ProfileSid != profileSid
+                || !String.Equals(backup.ProfileRoot, profileRoot, StringComparison.OrdinalIgnoreCase)
+                || (backup.RetainedShortcut != "" && !IsHash(backup.RetainedShortcut))
+                || (AppOnly && (!IsHash(backup.ConfigBefore) || backup.ConfigBefore != backup.ConfigAfter)))
+                throw new InvalidDataException("The update backup target/profile does not match protected enrollment.");
+            RequireProfileBinding();
         }
 
         private static bool IsHash(string text) { return Regex.IsMatch(text ?? "", "^[a-f0-9]{64}$"); }

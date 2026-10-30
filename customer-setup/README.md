@@ -4,9 +4,11 @@ Single-file Windows x64 bootstrapper wrapping the official, unmodified RustDesk
 1.5.0 portable installer. Built with the Windows .NET Framework compiler; no
 additional .NET download or PowerShell execution is required on customer PCs.
 
-Current source candidate: **1.1.0**. Build output:
-`dist/Touch365-Remote-Support-Setup-1.1.0.exe`. It includes the 1.0.2 certificate
-retry and an opt-in authenticated application/configuration updater. The default
+Current source candidate: **1.1.1**. Build output:
+`dist/Touch365-Remote-Support-Setup-1.1.1.exe`. It includes the 1.0.2 certificate
+retry, service-managed application/configuration updates and service-free
+app-only updates. App-only mode preserves the enrolled Windows user's profile,
+refuses all configuration updates and does not install a RustDesk service. The default
 build has no production signing trust/feed and updating is disabled. See
 [`UPDATER.md`](UPDATER.md) for controls, supported packages and activation steps.
 This candidate has not been published as a release or accepted on a customer PC.

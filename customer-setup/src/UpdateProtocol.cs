@@ -29,7 +29,7 @@ namespace Touch365Support
         public long Sequence;
         public DateTime IssuedUtc, ExpiresUtc;
         public Version BinaryVersion;
-        public string PackageUrl, PackageSha256;
+        public string PackageUrl, PackageSha256, PackageLayout;
         public long PackageBytes, ConfigVersion;
         public Dictionary<string, string> Options = new Dictionary<string, string>(StringComparer.Ordinal);
         public List<UpdateFile> Files = new List<UpdateFile>();
@@ -164,7 +164,12 @@ namespace Touch365Support
 
         static void ReadBinary(XElement binary, UpdateTrust trust, UpdateManifest result)
         {
-            Container(binary, "binary", "version", "url", "bytes", "sha256");
+            bool complete = binary.Attribute("layout") != null;
+            if (complete) Container(binary, "binary", "version", "url", "bytes", "sha256", "layout");
+            else Container(binary, "binary", "version", "url", "bytes", "sha256");
+            result.PackageLayout = complete ? Attr(binary, "layout") : null;
+            if (complete && result.PackageLayout != UpdatePackage.CompleteLayout)
+                throw new InvalidDataException("The application package layout is not supported.");
             result.BinaryVersion = ParseVersion(Attr(binary, "version"));
             result.PackageUrl = DownloadUri(Attr(binary, "url"), trust).AbsoluteUri;
             if (!new Uri(result.PackageUrl).AbsolutePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
@@ -178,7 +183,7 @@ namespace Touch365Support
             {
                 Container(file, "file", "path", "bytes", "sha256");
                 if (file.Elements().Any()) throw new InvalidDataException("Update file records cannot contain nested elements.");
-                string path = SafePackagePath(Attr(file, "path"));
+                string path = SafePackagePath(Attr(file, "path"), result.PackageLayout);
                 if (!paths.Add(path) || paths.Any(p => !String.Equals(p, path, StringComparison.OrdinalIgnoreCase) &&
                     (p.StartsWith(path + "/", StringComparison.OrdinalIgnoreCase) || path.StartsWith(p + "/", StringComparison.OrdinalIgnoreCase))))
                     throw new InvalidDataException("The update package has duplicate or conflicting Windows file paths.");
@@ -192,7 +197,8 @@ namespace Touch365Support
             }
             if (!paths.Contains("RustDesk.exe") || !result.Files.Any(f => f.Path == "RustDesk.exe"))
                 throw new InvalidDataException("The application package must contain root RustDesk.exe.");
-            PackageDirectories(result.Files);
+            PackageDirectories(result.Files, result.PackageLayout);
+            if (complete) UpdatePackage.RequireCompleteApplication(result);
         }
 
         static void ReadConfiguration(XElement configuration, UpdateManifest result)
@@ -319,7 +325,7 @@ namespace Touch365Support
                 using (var zip = new ZipArchive(input, ZipArchiveMode.Read, true))
                 {
                     if (zip.Entries.Count > MaximumFiles * 2) throw new InvalidDataException("The ZIP contains too many file or directory records.");
-                    Dictionary<string, string> directories = PackageDirectories(manifest.Files);
+                    Dictionary<string, string> directories = PackageDirectories(manifest.Files, manifest.PackageLayout);
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     int fileCount = 0;
                     foreach (ZipArchiveEntry entry in zip.Entries)
@@ -339,7 +345,7 @@ namespace Touch365Support
                                 throw new InvalidDataException("The ZIP contains an unsigned or ambiguous directory record.");
                             continue;
                         }
-                        SafePackagePath(entryPath);
+                        SafePackagePath(entryPath, manifest.PackageLayout);
                         UpdateFile expected = manifest.Files.SingleOrDefault(f => f.Path == entryPath);
                         if (expected == null || entry.Length != expected.Bytes || (attributes & (uint)FileAttributes.Directory) != 0 ||
                             unixType == 0x4000U || (entry.Length > 1024 * 1024 &&
@@ -356,8 +362,17 @@ namespace Touch365Support
         }
 
         internal static string SafePackagePath(string path)
+        { return SafePackagePath(path, null); }
+
+        internal static string SafePackagePath(string path, string layout)
         {
             SafeRelativePath(path);
+            if (!String.IsNullOrEmpty(layout))
+            {
+                if (layout != UpdatePackage.CompleteLayout || !UpdatePackage.IsCompleteApplicationPath(path))
+                    throw new InvalidDataException("The complete application package has an unapproved path.");
+                return path;
+            }
             if (path != "RustDesk.exe" && !ResourceExtensions.Contains(Path.GetExtension(path)))
                 throw new InvalidDataException("The update package includes an unapproved executable, script or resource type.");
             return path;
@@ -385,13 +400,16 @@ namespace Touch365Support
         }
 
         internal static Dictionary<string, string> PackageDirectories(IEnumerable<UpdateFile> files)
+        { return PackageDirectories(files, null); }
+
+        internal static Dictionary<string, string> PackageDirectories(IEnumerable<UpdateFile> files, string layout)
         {
             var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (files == null) throw new InvalidDataException("The signed update file inventory is missing.");
             foreach (UpdateFile file in files)
             {
                 if (file == null) throw new InvalidDataException("The signed update file inventory is incomplete.");
-                string path = SafePackagePath(file.Path);
+                string path = SafePackagePath(file.Path, layout);
                 int slash = path.LastIndexOf('/');
                 while (slash >= 0)
                 {
@@ -652,6 +670,8 @@ namespace Touch365Support
             foreach (var option in manifest.Options.OrderBy(p => p.Key, StringComparer.Ordinal)) { Append(text, option.Key); Append(text, option.Value); }
             Append(text, manifest.Files.Count.ToString(CultureInfo.InvariantCulture));
             foreach (UpdateFile file in manifest.Files) { if (file == null) throw new InvalidDataException("The update file list was changed."); Append(text, file.Path); Append(text, file.Sha256); Append(text, file.Bytes.ToString(CultureInfo.InvariantCulture)); }
+            // Preserve legacy bindings when no layout was signed, including old journals.
+            if (!String.IsNullOrEmpty(manifest.PackageLayout)) { Append(text, "package-layout"); Append(text, manifest.PackageLayout); }
             return Hash(Utf8.GetBytes(text.ToString()));
         }
         static void Append(StringBuilder target, string value)

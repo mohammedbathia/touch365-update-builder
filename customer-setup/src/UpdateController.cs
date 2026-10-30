@@ -56,6 +56,21 @@ namespace Touch365Support
                     MessageBox.Show("Enrollment recorded. Open the update controller when you want automatic checks. No startup task or service was registered.", "Touch365 updates");
                     result = 0;
                 }
+                else if (args.Length == 2 && args[0] == "--updater-enroll-app")
+                {
+                    RequireAdministrator();
+                    if (!UpdateTrust.LoadEmbedded().IsConfigured) throw Disabled();
+                    if (!String.Equals(WindowsIdentity.GetCurrent().User.Value, args[1], StringComparison.Ordinal))
+                        throw new InvalidOperationException("App-only enrollment requires administrator approval using the same Windows account that opened the controller.");
+                    if (MessageBox.Show("Enroll service-free application updates for this Windows account?\r\n\r\n" +
+                        "This creates protected version/recovery records. RustDesk must be closed and have no installed service. " +
+                        "Your identity, servers and permissions are preserved. Configuration updates are disabled in this mode. " +
+                        "Every application still requires review and administrator approval. No service or startup entry is installed.",
+                        "Touch365 app-only enrollment", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return true;
+                    WindowsUpdateEnvironment.EnrollAppOnly(DateTime.UtcNow, args[1]);
+                    MessageBox.Show("App-only enrollment recorded. Open the controller when you want update checks. No RustDesk service or startup entry was installed.", "Touch365 updates");
+                    result = 0;
+                }
                 else if (args.Length == 4 && args[0] == "--updater-apply")
                 {
                     RequireAdministrator();
@@ -67,16 +82,16 @@ namespace Touch365Support
                     UpdateManifest manifest = UpdateProtocol.ParseEnvelope(envelope, trust, DateTime.UtcNow);
                     if (!String.Equals(manifest.Digest, args[2], StringComparison.Ordinal))
                         throw new InvalidDataException("The update changed after review. Check for updates again.");
-                    if (MessageBox.Show(Describe(manifest) + "\r\n\r\nApprove this exact signed update?\r\n" +
-                        "RustDesk and its service must already be stopped. The updater will not stop a session or restart the service. " +
-                        "Configuration changes listed above affect remote access and require your approval.",
-                        "Review Touch365 update", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return true;
-
                     var environment = new WindowsUpdateEnvironment();
-                    using (environment.AcquireLock())
-                    {
-                        if (!environment.LoadState().Enrolled) throw new InvalidOperationException("Enroll this PC before staging privileged maintenance.");
-                    }
+                    UpdateState enrollment;
+                    using (environment.AcquireLock()) enrollment = environment.LoadState();
+                    RequireCompatibleBeforeStaging(enrollment, manifest);
+                    string maintenance = enrollment.TargetMode == UpdateState.AppOnly
+                        ? "RustDesk must already be closed with no installed service. Your user profile will not be written. "
+                        : "RustDesk and its service must already be stopped. Configuration changes listed above affect remote access. ";
+                    if (MessageBox.Show(Describe(manifest) + "\r\n\r\nApprove this exact signed update?\r\n" +
+                        maintenance + "The updater will not end a session, install a driver, or start RustDesk. The approved update must complete before you reopen it.",
+                        "Review Touch365 update", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return true;
                     string staged = "";
                     if (manifest.BinaryVersion != null)
                     {
@@ -108,7 +123,7 @@ namespace Touch365Support
                 else if (args.Length == 1 && args[0] == "--updater-recover")
                 {
                     RequireAdministrator();
-                    if (MessageBox.Show("Verify or restore the recorded interrupted update? RustDesk and its service must already be stopped. " +
+                    if (MessageBox.Show("Verify or restore the recorded interrupted update? Quit RustDesk first; service-managed installations also need their service stopped. " +
                         "Unexpected concurrent changes will be preserved for manual recovery.", "Touch365 update recovery",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return true;
                     string outcome = new UpdateCoordinator(new WindowsUpdateEnvironment()).Recover(DateTime.UtcNow);
@@ -140,6 +155,12 @@ namespace Touch365Support
                 return data;
             }
         }
+        internal static void RequireCompatibleBeforeStaging(UpdateState state, UpdateManifest manifest)
+        {
+            if (state == null || !state.Enrolled) throw new InvalidOperationException("Enroll this PC before staging privileged maintenance.");
+            UpdateCoordinator.RequireCompatibleUpdate(state, manifest);
+            if (manifest.BinaryVersion != null) UpdatePackage.RequireCompleteApplication(manifest);
+        }
         private static void RequireAdministrator()
         {
             if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
@@ -165,7 +186,7 @@ namespace Touch365Support
             switch (status)
             {
                 case "Applied": return "The update's files and configuration were verified. RustDesk remains stopped; start it only when you are ready to verify the update.";
-                case "DeferredActiveSession": return "Nothing was applied. End support sessions, quit RustDesk and have your administrator stop its service before retrying.";
+                case "DeferredActiveSession": return "Nothing was applied. Finish support sessions and quit RustDesk. Service-managed installations also need their service stopped by your administrator before retrying.";
                 case "RolledBack": return "The update did not complete. The previous files and settings were restored and verified. RustDesk remains stopped.";
                 case "RecoveredApplied": return "The interrupted update was already complete; its files/settings were verified and the recovery journal was finalized.";
                 case "NoUpdate": return "This signed update is already recorded as applied, or no interrupted update needs recovery.";
@@ -179,7 +200,7 @@ namespace Touch365Support
         private readonly UpdateTrust trust;
         private readonly Label status;
         private readonly TextBox details;
-        private readonly Button check, apply, enroll, recover;
+        private readonly Button check, apply, enroll, enrollApp, recover;
         private readonly CheckBox automatic;
         private readonly System.Windows.Forms.Timer timer;
         private bool busy;
@@ -205,13 +226,14 @@ namespace Touch365Support
             body.RowStyles.Add(new RowStyle(SizeType.AutoSize)); body.RowStyles.Add(new RowStyle(SizeType.AutoSize)); body.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.Controls.Add(body, 0, 1);
             status = new Label { AutoSize = true, Dock = DockStyle.Fill, Text = trust.IsConfigured ? "Ready to check the pinned update channel." : "Automatic updates are not activated.", ForeColor = Color.FromArgb(0, 119, 125), Margin = new Padding(0, 0, 0, 12), AccessibleName = "Update status" }; body.Controls.Add(status, 0, 0);
             automatic = new CheckBox { AutoSize = true, Dock = DockStyle.Fill, Text = "Check and stage hourly while this window is open", Enabled = trust.IsConfigured, Checked = trust.IsConfigured && ReadPreference(), Margin = new Padding(0, 0, 0, 12) }; body.Controls.Add(automatic, 0, 1);
-            details = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, AccessibleName = "Signed update details", Text = trust.IsConfigured ? "Checks and downloads do not change RustDesk. Applying any update requires review, administrator approval, enrollment and a stopped/idle client." : "A trusted public verification key, approved HTTPS feed and signed update metadata must be provisioned before checks or enrollment are enabled. No production signing key or feed is included." }; body.Controls.Add(details, 0, 2);
+            details = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, AccessibleName = "Signed update details", Text = trust.IsConfigured ? "Checks and downloads do not change RustDesk. Service-free app-only enrollment preserves your profile and rejects configuration updates. Service-managed enrollment supports approved configuration changes. Both require review, administrator approval and a closed/idle client before application." : "A trusted public verification key, approved HTTPS feed and signed update metadata must be provisioned before checks or enrollment are enabled. No production signing key or feed is included." }; body.Controls.Add(details, 0, 2);
             var footer = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Padding = new Padding(20, 12, 20, 12), BackColor = Color.FromArgb(244, 247, 250) }; root.Controls.Add(footer, 0, 2);
-            check = Button("Check now", footer); apply = Button("Review and apply...", footer); enroll = Button("Enroll this PC...", footer); recover = Button("Recover...", footer);
-            check.Enabled = enroll.Enabled = trust.IsConfigured; apply.Enabled = false;
+            check = Button("Check now", footer); apply = Button("Review and apply...", footer); enrollApp = Button("Enroll app-only...", footer); enroll = Button("Enroll service-managed...", footer); recover = Button("Recover...", footer);
+            check.Enabled = enroll.Enabled = enrollApp.Enabled = trust.IsConfigured; apply.Enabled = false;
             check.Click += async delegate { await CheckAsync(); };
             apply.Click += async delegate { if (pending != null) await ElevatedAsync("--updater-apply", envelopePath, pending.Digest, packagePath ?? "-"); };
             enroll.Click += async delegate { await ElevatedAsync("--updater-enroll"); };
+            enrollApp.Click += async delegate { await ElevatedAsync("--updater-enroll-app", WindowsIdentity.GetCurrent().User.Value); };
             recover.Click += async delegate { await ElevatedAsync("--updater-recover"); };
             timer = new System.Windows.Forms.Timer { Interval = 60 * 60 * 1000 };
             timer.Tick += async delegate { if (automatic.Checked) await CheckAsync(); };
@@ -227,7 +249,7 @@ namespace Touch365Support
         }
         private void SetBusy(bool value)
         {
-            busy = value; check.Enabled = enroll.Enabled = automatic.Enabled = !value && trust.IsConfigured;
+            busy = value; check.Enabled = enroll.Enabled = enrollApp.Enabled = automatic.Enabled = !value && trust.IsConfigured;
             apply.Enabled = !value && pending != null; recover.Enabled = !value;
         }
         private async Task CheckAsync()

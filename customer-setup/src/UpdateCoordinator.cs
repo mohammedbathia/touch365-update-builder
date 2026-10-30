@@ -31,6 +31,9 @@ namespace Touch365Support
 
     public sealed class UpdateState
     {
+        public const string ServiceManaged = "service-managed", AppOnly = "app-only";
+        public string TargetMode = ServiceManaged;
+        public string ProfileSid = "", ProfileRoot = "";
         public bool Enrolled;
         public long SeenSequence;
         public string SeenDigest = "";
@@ -44,7 +47,8 @@ namespace Touch365Support
         {
             Validate();
             var root = new XElement("updaterState",
-                new XAttribute("schema", "1"), new XAttribute("enrolled", Enrolled ? "true" : "false"),
+                new XAttribute("schema", "2"), new XAttribute("enrolled", Enrolled ? "true" : "false"),
+                new XAttribute("targetMode", TargetMode), new XAttribute("profileSid", ProfileSid), new XAttribute("profileRoot", ProfileRoot),
                 new XAttribute("seenSequence", Number(SeenSequence)), new XAttribute("seenDigest", SeenDigest ?? ""),
                 new XAttribute("lastSeenUtc", Time(LastSeenUtc)),
                 new XAttribute("highestBinaryVersion", HighestBinaryVersion == null ? "" : HighestBinaryVersion.ToString()),
@@ -57,14 +61,21 @@ namespace Touch365Support
 
         public static UpdateState FromXml(XElement root)
         {
-            Attributes(root, "updaterState", "schema", "enrolled", "seenSequence", "seenDigest", "lastSeenUtc", "highestBinaryVersion", "highestConfigVersion", "appliedSequence");
-            if (Value(root, "schema") != "1") throw Corrupt();
+            if (root == null) throw Corrupt();
+            string schema = Value(root, "schema");
+            if (schema == "1")
+                Attributes(root, "updaterState", "schema", "enrolled", "seenSequence", "seenDigest", "lastSeenUtc", "highestBinaryVersion", "highestConfigVersion", "appliedSequence");
+            else if (schema == "2")
+                Attributes(root, "updaterState", "schema", "enrolled", "targetMode", "profileSid", "profileRoot", "seenSequence", "seenDigest", "lastSeenUtc", "highestBinaryVersion", "highestConfigVersion", "appliedSequence");
+            else throw Corrupt();
             string enrolled = Value(root, "enrolled");
             if (enrolled != "true" && enrolled != "false") throw Corrupt();
             var state = new UpdateState {
                 Enrolled = enrolled == "true", SeenSequence = ReadNumber(root, "seenSequence"), SeenDigest = Value(root, "seenDigest"),
                 LastSeenUtc = ReadTime(root, "lastSeenUtc"), HighestBinaryVersion = ReadVersion(root, "highestBinaryVersion"),
-                HighestConfigVersion = ReadNumber(root, "highestConfigVersion"), AppliedSequence = ReadNumber(root, "appliedSequence")
+                HighestConfigVersion = ReadNumber(root, "highestConfigVersion"), AppliedSequence = ReadNumber(root, "appliedSequence"),
+                TargetMode = schema == "1" ? ServiceManaged : Value(root, "targetMode"),
+                ProfileSid = schema == "1" ? "" : Value(root, "profileSid"), ProfileRoot = schema == "1" ? "" : Value(root, "profileRoot")
             };
             if (root.Elements().Count() > 1 || root.Elements().Any(e => e.Name != "pending")) throw Corrupt();
             XElement pending = root.Element("pending");
@@ -72,7 +83,7 @@ namespace Touch365Support
             {
                 Attributes(pending, "pending", "backupId", "phase");
                 if (pending.Elements().Count() != 1 || pending.Elements().Single().Name != "manifest") throw Corrupt();
-                state.Pending = new UpdatePending { BackupId = Value(pending, "backupId"), Phase = Value(pending, "phase"), Manifest = ReadManifest(pending.Element("manifest")) };
+                state.Pending = new UpdatePending { BackupId = Value(pending, "backupId"), Phase = Value(pending, "phase"), Manifest = ReadManifest(pending.Element("manifest"), schema == "1") };
             }
             state.Validate();
             return state;
@@ -94,15 +105,31 @@ namespace Touch365Support
                 || (manifest.ConfigVersion == 0 && manifest.Options != null && manifest.Options.Count != 0)
                 || (manifest.ConfigVersion > 0 && (manifest.Options == null || manifest.Options.Count == 0)))
                 throw new InvalidDataException("The authenticated update manifest is incomplete.");
+            if (!String.IsNullOrEmpty(manifest.PackageLayout)
+                && (manifest.BinaryVersion == null || manifest.PackageLayout != UpdatePackage.CompleteLayout))
+                throw new InvalidDataException("The authenticated package layout is unsupported.");
         }
 
         private void Validate()
         {
+            if (TargetMode == ServiceManaged)
+            {
+                if (ProfileSid != "" || ProfileRoot != "") throw Corrupt();
+            }
+            else if (TargetMode == AppOnly)
+            {
+                if (String.IsNullOrEmpty(ProfileSid) || !Regex.IsMatch(ProfileSid, "^S-1-[0-9]+(?:-[0-9]+){1,14}$")
+                    || String.IsNullOrEmpty(ProfileRoot) || !Regex.IsMatch(ProfileRoot, @"^[A-Za-z]:\\")
+                    || ProfileRoot.IndexOf('\0') >= 0 || !String.Equals(Path.GetFullPath(ProfileRoot), ProfileRoot, StringComparison.OrdinalIgnoreCase)
+                    || HighestConfigVersion != 0) throw Corrupt();
+            }
+            else throw Corrupt();
             if (SeenSequence < 0 || AppliedSequence < 0 || AppliedSequence > SeenSequence || HighestConfigVersion < 0
                 || LastSeenUtc.Kind != DateTimeKind.Utc || (SeenSequence == 0 ? !String.IsNullOrEmpty(SeenDigest) : !Digest(SeenDigest)))
                 throw Corrupt();
             if (Pending == null) return;
             ValidateManifest(Pending.Manifest);
+            if (TargetMode == AppOnly) UpdateCoordinator.RequireCompatibleUpdate(this, Pending.Manifest);
             if (!Regex.IsMatch(Pending.BackupId ?? "", "^[A-Za-z0-9._-]{1,128}$") || Pending.BackupId == "." || Pending.BackupId == ".."
                 || (Pending.Phase != "Prepared" && Pending.Phase != "Applying" && Pending.Phase != "RecoveryRequired")
                 || Pending.Manifest.Sequence != SeenSequence || !SameDigest(Pending.Manifest.Digest, SeenDigest)
@@ -117,6 +144,7 @@ namespace Touch365Support
                 new XAttribute("sequence", Number(manifest.Sequence)), new XAttribute("issuedUtc", Time(manifest.IssuedUtc)),
                 new XAttribute("expiresUtc", Time(manifest.ExpiresUtc)),
                 new XAttribute("binaryVersion", manifest.BinaryVersion == null ? "" : manifest.BinaryVersion.ToString()),
+                new XAttribute("packageLayout", manifest.PackageLayout ?? ""),
                 new XAttribute("packageUrl", manifest.PackageUrl ?? ""), new XAttribute("packageSha256", manifest.PackageSha256 ?? ""),
                 new XAttribute("packageBytes", Number(manifest.PackageBytes)), new XAttribute("configVersion", Number(manifest.ConfigVersion)),
                 new XAttribute("boundFields", manifest.BoundFields ?? ""), new XAttribute("boundTrust", manifest.BoundTrust ?? ""));
@@ -127,15 +155,19 @@ namespace Touch365Support
             return root;
         }
 
-        private static UpdateManifest ReadManifest(XElement root)
+        private static UpdateManifest ReadManifest(XElement root, bool legacy = false)
         {
-            Attributes(root, "manifest", "digest", "sequence", "issuedUtc", "expiresUtc", "binaryVersion", "packageUrl", "packageSha256", "packageBytes", "configVersion", "boundFields", "boundTrust");
+            if (legacy)
+                Attributes(root, "manifest", "digest", "sequence", "issuedUtc", "expiresUtc", "binaryVersion", "packageUrl", "packageSha256", "packageBytes", "configVersion", "boundFields", "boundTrust");
+            else
+                Attributes(root, "manifest", "digest", "sequence", "issuedUtc", "expiresUtc", "binaryVersion", "packageLayout", "packageUrl", "packageSha256", "packageBytes", "configVersion", "boundFields", "boundTrust");
             if (root.Elements().Count() != 2 || root.Elements("options").Count() != 1 || root.Elements("files").Count() != 1) throw Corrupt();
             XElement options = root.Element("options"), files = root.Element("files");
             Attributes(options, "options"); Attributes(files, "files");
             var manifest = new UpdateManifest {
                 Digest = Value(root, "digest"), Sequence = ReadNumber(root, "sequence"), IssuedUtc = ReadTime(root, "issuedUtc"),
                 ExpiresUtc = ReadTime(root, "expiresUtc"), BinaryVersion = ReadVersion(root, "binaryVersion"),
+                PackageLayout = legacy ? null : NullIfEmpty(Value(root, "packageLayout")),
                 PackageUrl = Value(root, "packageUrl"), PackageSha256 = Value(root, "packageSha256"), PackageBytes = ReadNumber(root, "packageBytes"),
                 ConfigVersion = ReadNumber(root, "configVersion"), Options = new Dictionary<string, string>(StringComparer.Ordinal), Files = new List<UpdateFile>(),
                 BoundFields = NullIfEmpty(Value(root, "boundFields")), BoundTrust = NullIfEmpty(Value(root, "boundTrust"))
@@ -194,6 +226,7 @@ namespace Touch365Support
             {
                 if (maintenance == null) throw new InvalidOperationException("Another maintenance operation is running.");
                 UpdateState state = Load(now);
+                RequireCompatibleUpdate(state, candidate);
                 if (candidate.IssuedUtc.Ticks > now.Ticks + ClockToleranceTicks || candidate.ExpiresUtc <= now)
                     throw new InvalidOperationException("Update metadata is expired or not yet valid.");
                 if (candidate.Sequence < state.SeenSequence || (candidate.Sequence == state.SeenSequence && !UpdateState.SameDigest(candidate.Digest, state.SeenDigest)))
@@ -244,6 +277,18 @@ namespace Touch365Support
             if (now.Ticks + ClockToleranceTicks < state.LastSeenUtc.Ticks)
                 throw new InvalidOperationException("The clock moved backwards. Administrator recovery is required.");
             return state;
+        }
+
+        // Shared by the coordinator and elevated handoff before protected staging.
+        // A signed feed cannot widen an administrator's app-only enrollment.
+        public static void RequireCompatibleUpdate(UpdateState state, UpdateManifest manifest)
+        {
+            if (state == null || manifest == null) throw new InvalidDataException("The update target is missing.");
+            if (state.TargetMode == UpdateState.AppOnly && (manifest.BinaryVersion == null || manifest.ConfigVersion != 0
+                || (manifest.Options != null && manifest.Options.Count != 0) || manifest.PackageLayout != UpdatePackage.CompleteLayout))
+                throw new InvalidOperationException("This PC is enrolled for service-free application updates only. Configuration updates and incomplete application packages cannot be applied.");
+            if (state.TargetMode != UpdateState.AppOnly && state.TargetMode != UpdateState.ServiceManaged)
+                throw new InvalidDataException("The enrolled update mode is invalid.");
         }
 
         private void ValidateVersions(UpdateManifest candidate, UpdateState state)

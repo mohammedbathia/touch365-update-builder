@@ -114,6 +114,15 @@ internal static class UpdateCoordinatorTests
             Pending = new UpdatePending { Manifest = manifest, BackupId = "fixture-backup", Phase = phase }
         };
     }
+    private static UpdateState AppOnlyState()
+    {
+        return new UpdateState { Enrolled = true, TargetMode = UpdateState.AppOnly,
+            ProfileSid = "S-1-5-21-1-2-3-1001", ProfileRoot = @"C:\Users\Fixture\AppData\Roaming\RustDesk\config" };
+    }
+    private static UpdateManifest AppBinary()
+    {
+        UpdateManifest manifest = Binary(); manifest.PackageLayout = UpdatePackage.CompleteLayout; return manifest;
+    }
     private static void Assert(bool value, string message) { if (!value) throw new Exception(message); }
     private static Exception Throws(Action action)
     {
@@ -300,6 +309,70 @@ internal static class UpdateCoordinatorTests
             fake.OnBackup = delegate { manifest.Sequence = 99; manifest.BinaryVersion = new Version(9, 9, 9); };
             Assert(new UpdateCoordinator(fake).Run(manifest, "staged", manifest.Digest, Now) == "Applied" && fake.State.AppliedSequence == 1
                 && fake.CurrentVersion == new Version(1, 6, 0), "External mutation changed the approved transaction.");
+        });
+        Test("legacy state migrates only to the service-managed mode and retains pending fields", delegate
+        {
+            XElement legacy = Interrupted(Binary(), "Applying").ToXml();
+            legacy.SetAttributeValue("schema", "1");
+            legacy.Attribute("targetMode").Remove(); legacy.Attribute("profileSid").Remove(); legacy.Attribute("profileRoot").Remove();
+            legacy.Element("pending").Element("manifest").Attribute("packageLayout").Remove();
+            UpdateState state = UpdateState.FromXml(legacy);
+            Assert(state.TargetMode == UpdateState.ServiceManaged && state.ProfileSid == "" && state.ProfileRoot == ""
+                && state.Pending.Manifest.PackageLayout == null && state.SeenSequence == 1, "Legacy state lost its original target semantics.");
+            Assert((string)state.ToXml().Attribute("schema") == "2", "A migrated state was not written with explicit target binding.");
+        });
+        Test("app-only target and signed package layout survive durable pending round trips", delegate
+        {
+            UpdateManifest manifest = AppBinary(); manifest.BoundFields = new string('d', 64); manifest.BoundTrust = new string('e', 64);
+            UpdateState state = AppOnlyState(); state.SeenSequence = 1; state.SeenDigest = manifest.Digest;
+            state.HighestBinaryVersion = manifest.BinaryVersion; state.Pending = new UpdatePending { Manifest = manifest, BackupId = "fixture-backup", Phase = "Applying" };
+            UpdateState copy = UpdateState.FromXml(state.ToXml());
+            Assert(copy.TargetMode == UpdateState.AppOnly && copy.ProfileSid == state.ProfileSid && copy.ProfileRoot == state.ProfileRoot
+                && copy.Pending.Manifest.PackageLayout == UpdatePackage.CompleteLayout && copy.Pending.Manifest.BoundFields == manifest.BoundFields
+                && copy.Pending.Manifest.BoundTrust == manifest.BoundTrust, "App-only recovery lost target or signed layout binding.");
+        });
+        Test("unknown modes and incomplete or cross-mode profile bindings fail closed", delegate
+        {
+            UpdateState unknown = new UpdateState { TargetMode = "auto-detect" }; Throws(delegate { unknown.ToXml(); });
+            UpdateState missingSid = AppOnlyState(); missingSid.ProfileSid = ""; Throws(delegate { missingSid.ToXml(); });
+            UpdateState relative = AppOnlyState(); relative.ProfileRoot = @"C:\Users\Fixture\..\Other"; Throws(delegate { relative.ToXml(); });
+            UpdateState network = AppOnlyState(); network.ProfileRoot = @"\\server\profile"; Throws(delegate { network.ToXml(); });
+            UpdateState crossed = new UpdateState { ProfileSid = "S-1-5-21-1-2-3-1001" }; Throws(delegate { crossed.ToXml(); });
+            UpdateState configFloor = AppOnlyState(); configFloor.HighestConfigVersion = 1; Throws(delegate { configFloor.ToXml(); });
+        });
+        Test("app-only rejects config-only mixed and legacy packages before any replay-state write", delegate
+        {
+            UpdateManifest mixed = AppBinary(); mixed.ConfigVersion = 1; mixed.Options.Add("approve-mode", "click");
+            foreach (UpdateManifest manifest in new[] { Config(), mixed, Binary() })
+            {
+                var fake = new Fake { State = AppOnlyState() };
+                Throws(delegate { new UpdateCoordinator(fake).Run(manifest, "staged", manifest.Digest, Now); });
+                Assert(fake.SaveCount == 0 && fake.BackupCount == 0 && fake.ApplyCount == 0 && fake.State.SeenSequence == 0,
+                    "An incompatible signed update advanced an app-only enrollment or touched application data.");
+            }
+        });
+        Test("app-only successful application preserves protected target binding", delegate
+        {
+            var fake = new Fake { State = AppOnlyState() }; UpdateManifest manifest = AppBinary();
+            Assert(new UpdateCoordinator(fake).Run(manifest, "staged", manifest.Digest, Now) == "Applied", "Compatible app-only transaction failed.");
+            Assert(fake.State.TargetMode == UpdateState.AppOnly && fake.State.ProfileSid == "S-1-5-21-1-2-3-1001"
+                && fake.State.HighestConfigVersion == 0 && fake.State.AppliedSequence == 1 && fake.ApplyCount == 1, "App-only application changed scope.");
+        });
+        Test("app-only uncertain commit recovers without reapplication or binding loss", delegate
+        {
+            var fake = new Fake { State = AppOnlyState(), FailCommitSave = true }; UpdateManifest manifest = AppBinary();
+            var coordinator = new UpdateCoordinator(fake);
+            Throws(delegate { coordinator.Run(manifest, "staged", manifest.Digest, Now); });
+            Assert(fake.State.Pending != null && fake.State.Pending.Manifest.PackageLayout == UpdatePackage.CompleteLayout, "Uncertain commit lost app-only intent.");
+            fake.FailCommitSave = false;
+            Assert(coordinator.Recover(Now) == "RecoveredApplied" && fake.ApplyCount == 1 && fake.State.TargetMode == UpdateState.AppOnly,
+                "App-only recovery reinstalled or switched mode.");
+        });
+        Test("app-only same-version update is still rejected without lowering floors", delegate
+        {
+            var fake = new Fake { State = AppOnlyState() }; UpdateManifest manifest = AppBinary(); manifest.BinaryVersion = fake.CurrentVersion;
+            Throws(delegate { new UpdateCoordinator(fake).Run(manifest, "staged", manifest.Digest, Now); });
+            Assert(fake.SaveCount == 0 && fake.ApplyCount == 0, "The service-free mode bypassed version protection.");
         });
         Console.WriteLine("RESULT updater coordinator " + passed + " passed, " + failed + " failed.");
         return failed;

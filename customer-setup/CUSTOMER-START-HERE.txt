@@ -2,7 +2,7 @@ TOUCH365 REMOTE SUPPORT
 Windows 10/11, 64-bit
 
 FIRST TIME
-1. Open Touch365-Remote-Support-Setup-1.1.0.exe.
+1. Open Touch365-Remote-Support-Setup-1.1.1.exe.
 2. Approve the Windows administrator prompt. If you do not have administrator
    access, your IT administrator must approve this first setup.
 3. RustDesk opens automatically. Wait for Ready and give Touch365 your ID.
@@ -40,6 +40,10 @@ This source candidate includes an update controller, but no production update
 channel is activated. Touch365 must approve and provision it before enrollment.
 Future updates require review and administrator approval; configuration changes
 cannot silently change your server, key or remote-access permissions.
+Service-free app-only mode updates the application while preserving your
+existing identity and settings. It does not install a RustDesk service or
+support configuration changes. Checks run hourly only if selected and the
+update window stays open; every application still requires your approval.
 
-Version 1.1.0 is a source candidate awaiting customer-PC acceptance. Report any
+Version 1.1.1 is a source candidate awaiting customer-PC acceptance. Report any
 setup error to Touch365; do not enter any passwords into a support chat.

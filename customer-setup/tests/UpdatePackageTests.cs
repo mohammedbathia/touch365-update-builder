@@ -84,12 +84,19 @@ internal static class UpdatePackageTests
     {
         var binary = new XElement("binary", new XAttribute("version", manifest.BinaryVersion.ToString()),
             new XAttribute("url", "https://downloads.example.com/package.zip"), new XAttribute("bytes", manifest.PackageBytes),
-            new XAttribute("sha256", manifest.PackageSha256), manifest.Files.Select(file => new XElement("file",
+            new XAttribute("sha256", manifest.PackageSha256), String.IsNullOrEmpty(manifest.PackageLayout) ? null : new XAttribute("layout", manifest.PackageLayout), manifest.Files.Select(file => new XElement("file",
                 new XAttribute("path", file.Path), new XAttribute("bytes", file.Bytes), new XAttribute("sha256", file.Sha256))));
         return UpdateProtocolTests.ParseFixtureBody(binary.ToString(SaveOptions.DisableFormatting));
     }
     private static Entry[] Normal()
     { return new[] { new Entry("RustDesk.exe", "unsigned executable fixture"), new Entry("data/settings.json", "{\"fixture\":true}") }; }
+
+    private static Entry[] Complete()
+    { return UpdatePackage.CompleteFiles.Select(path => new Entry(path, "bounded runtime fixture: " + path) { Bytes = path == "RustDesk.exe" ? new byte[512] : Encoding.UTF8.GetBytes("bounded runtime fixture: " + path) }).ToArray(); }
+
+    private static void ExtractComplete(string zip, string destination, UpdateManifest manifest, string broker,
+        Action<string> publisher, Action<string, string> microsoft)
+    { UpdatePackage.ExtractVerified(zip, destination, manifest, publisher, delegate { return new Version(1, 5, 1); }, microsoft, broker); }
 
     public static int Run()
     {
@@ -244,6 +251,77 @@ internal static class UpdatePackageTests
             Assert(UpdatePackage.Fingerprint(source) != before, "Content change was not reflected in fingerprint.");
             Reject(delegate { UpdatePackage.CopyVerified(source, backup); });
             Reject(delegate { UpdatePackage.CopyVerified(source, Path.Combine(source, "nested")); });
+        });
+        Test("complete profile requires every reviewed runtime file and rejects legacy or unknown layouts", delegate(string root)
+        {
+            var entries = Complete(); var manifest = Manifest(entries); manifest.PackageLayout = UpdatePackage.CompleteLayout;
+            UpdatePackage.RequireCompleteApplication(manifest);
+            manifest.Files.RemoveAll(file => file.Path == "data/app.so");
+            Reject(delegate { UpdatePackage.RequireCompleteApplication(manifest); });
+            manifest = Manifest(entries); manifest.PackageLayout = "unknown-layout";
+            Reject(delegate { UpdatePackage.RequireCompleteApplication(manifest); });
+            manifest.PackageLayout = null;
+            Reject(delegate { UpdatePackage.RequireCompleteApplication(manifest); });
+        });
+        Test("signed complete profile authenticates expanded assets but never generic scripts or second executables", delegate(string root)
+        {
+            var entries = Complete(); var manifest = Manifest(entries); manifest.PackageLayout = UpdatePackage.CompleteLayout;
+            string zip = Zip(root, entries, manifest); manifest = BindFixture(manifest);
+            Assert(manifest.PackageLayout == UpdatePackage.CompleteLayout, "Signed layout was lost.");
+            UpdateProtocol.VerifyPackage(zip, manifest);
+            foreach (string path in new[] { "run.js", "data/flutter_assets/packages/wakelock_plus/assets/other.js", "data/flutter_assets/assets/run.js", "other.exe", "drivers/new.inf", UpdatePackage.RetainedShortcut })
+                Reject(delegate { UpdateProtocol.SafePackagePath(path, UpdatePackage.CompleteLayout); });
+            Reject(delegate { UpdateProtocol.SafePackagePath("data/flutter_assets/packages/wakelock_plus/assets/no_sleep.js"); });
+            Reject(delegate { UpdateProtocol.SafePackagePath("RuntimeBroker_rustdesk.exe"); });
+            manifest.PackageLayout = null;
+            Reject(delegate { UpdateProtocol.VerifyPackage(zip, manifest); });
+        });
+        Test("complete extraction checks every application PE publisher and exact trusted Windows broker", delegate(string root)
+        {
+            var entries = Complete(); var manifest = Manifest(entries); manifest.PackageLayout = UpdatePackage.CompleteLayout;
+            string zip = Zip(root, entries, manifest), broker = Path.Combine(root, "trusted-system-broker.exe");
+            File.WriteAllBytes(broker, entries.Single(entry => entry.Name == "RuntimeBroker_rustdesk.exe").Bytes);
+            var publisherPaths = new List<string>(); var microsoftPaths = new List<string>();
+            string destination = Path.Combine(root, "stage");
+            ExtractComplete(zip, destination, manifest, broker, delegate(string path) { publisherPaths.Add(path); }, delegate(string path, string publisher) {
+                Assert(publisher == "Microsoft Windows" || publisher == "Microsoft Windows Hardware Compatibility Publisher", "Unexpected auxiliary trust policy.");
+                microsoftPaths.Add(path);
+            });
+            int applicationPeCount = entries.Count(entry => entry.Name == "RustDesk.exe" || (entry.Name.IndexOf('/') < 0 && entry.Name.EndsWith(".dll", StringComparison.Ordinal)));
+            Assert(publisherPaths.Count == applicationPeCount && publisherPaths.Distinct().Count() == applicationPeCount, "Application PE publisher coverage is incomplete.");
+            Assert(microsoftPaths.Count == 4 && microsoftPaths.Contains(broker), "Broker/catalog trust checks were not all performed.");
+            Assert(File.Exists(Path.Combine(destination, "data", "app.so")) && File.Exists(Path.Combine(destination, "data", "flutter_assets", "packages", "wakelock_plus", "assets", "no_sleep.js")), "Reviewed Flutter runtime resources were omitted.");
+        });
+        Test("complete extraction refuses a differently sourced broker despite accepted publisher", delegate(string root)
+        {
+            var entries = Complete(); var manifest = Manifest(entries); manifest.PackageLayout = UpdatePackage.CompleteLayout;
+            string zip = Zip(root, entries, manifest), broker = Path.Combine(root, "trusted-system-broker.exe");
+            File.WriteAllText(broker, "a different Microsoft executable is not the local RuntimeBroker");
+            string destination = Path.Combine(root, "stage");
+            Reject(delegate { ExtractComplete(zip, destination, manifest, broker, delegate { }, delegate { }); });
+            Assert(!Directory.Exists(destination), "Untrusted broker left a usable staged directory.");
+        });
+        Test("complete extraction fails if an auxiliary catalog publisher is untrusted", delegate(string root)
+        {
+            var entries = Complete(); var manifest = Manifest(entries); manifest.PackageLayout = UpdatePackage.CompleteLayout;
+            string zip = Zip(root, entries, manifest), broker = Path.Combine(root, "trusted-system-broker.exe");
+            File.WriteAllBytes(broker, entries.Single(entry => entry.Name == "RuntimeBroker_rustdesk.exe").Bytes);
+            Reject(delegate { ExtractComplete(zip, Path.Combine(root, "stage"), manifest, broker, delegate { }, delegate(string path, string publisher) {
+                if (path.EndsWith(".cat", StringComparison.Ordinal)) throw new InvalidDataException("Fixture rejected catalog trust.");
+            }); });
+        });
+        Test("retained shortcut must have exact protected hash and cannot authorize another extra file", delegate(string root)
+        {
+            var entries = Normal(); var manifest = Manifest(entries); string zip = Zip(root, entries, manifest);
+            string destination = Path.Combine(root, "stage"); ExtractFixture(zip, destination, manifest);
+            string shortcut = Path.Combine(destination, UpdatePackage.RetainedShortcut); File.WriteAllText(shortcut, "opaque pre-existing shortcut fixture");
+            string hash = SafeFiles.Digest(shortcut);
+            UpdatePackage.VerifyDirectoryCore(destination, manifest, hash, delegate { }, delegate { return new Version(1, 5, 1); }, delegate { }, "unused");
+            Reject(delegate { UpdatePackage.VerifyDirectoryCore(destination, manifest, null, delegate { }, delegate { return new Version(1, 5, 1); }, delegate { }, "unused"); });
+            File.AppendAllText(shortcut, "changed");
+            Reject(delegate { UpdatePackage.VerifyDirectoryCore(destination, manifest, hash, delegate { }, delegate { return new Version(1, 5, 1); }, delegate { }, "unused"); });
+            File.WriteAllText(shortcut, "opaque pre-existing shortcut fixture"); File.WriteAllText(Path.Combine(destination, "other.exe"), "unapproved");
+            Reject(delegate { UpdatePackage.VerifyDirectoryCore(destination, manifest, hash, delegate { }, delegate { return new Version(1, 5, 1); }, delegate { }, "unused"); });
         });
         Console.WriteLine("RESULT package " + passed + " passed, " + failed + " failed.");
         return failed;
